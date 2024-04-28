@@ -6,10 +6,11 @@ from pathlib import Path
 from pprint import pprint
 import asyncio
 import contextlib
-import json
-import subprocess
 import gzip
+import json
+import re
 import shutil
+import subprocess
 
 @click.group()
 def app():
@@ -66,80 +67,114 @@ def scan(cases_filename, test262_path, out):
 @click.option('-o', '--out', required=True, help='Results directory')
 @click.option('--force/--no-force', help='Overwrite results file if it exists')
 @click.option('-j', '--max-jobs', default=10, type=int, help='Limit the max number of concurrent tests running at any given time')
+@click.option('--commits', 'commits_filename', help='Checkout and test the commits listed in the given file.')
 @click.argument('testrun_filename', metavar='testrun.json')
-def run(testrun_filename, mcjs, out, force, max_jobs):
+def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
     with open(testrun_filename) as testrun_file:
         testrun = json.load(testrun_file)
         test262_path = Path(testrun['test262_path'])
         testcases = testrun['testcases']
 
-    with contextlib.chdir(mcjs):
-        vm_version = subprocess.run(
-            ['git', 'rev-parse', 'HEAD'],
-            check=True,
-            capture_output=True,
-            encoding='utf8'
-        ).stdout.strip()
+    if commits_filename:
+        commits = [
+            line.strip()
+            for line in open(commits_filename)
+        ]
 
-    print('Testing VM version:', vm_version)
+        if '%v' not in out:
+            raise RuntimeError('The output file (passed with --out) must include "%v" so that a new file per version is created.')
 
-    out = out.replace('%v', vm_version)
-    if out.endswith('/'):
-        out += 'out'
-    if not out.endswith('.jsonl'):
-        out = out + '.jsonl'
-    out = Path(out)
+    else:
+        with contextlib.chdir(mcjs):
+            vm_version = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                check=True,
+                capture_output=True,
+                encoding='utf8'
+            ).stdout.strip()
+            commits = [vm_version]
 
-    out.parent.mkdir(exist_ok=True)
-    if out.exists() and not force:
-        raise RuntimeError('Results file already exists: ' + str(out))
+    for commit in commits:
+        if not re.match(r'^[a-f0-9]+$', commit):
+            raise RuntimeError('Invalid commit hash in commits file:', commit)
 
-    testcase_semaphore = asyncio.Semaphore(max_jobs)
-    async def call_limited(func, *args, **kwargs):
-        async with testcase_semaphore:
-            return await func(*args, **kwargs)
-        
-    runner = Runner(
-        test262_path=test262_path,
-        vm_version=vm_version,
-        mcjs=mcjs,
-    )
-    tasks = []
-    for rel_path, testcase in testcases.items():
-        metadata = testcase['metadata'] or {}
+    original_out = out
 
-        def submit_task(use_strict):
-            tasks.append(call_limited(
-                runner.run_test,
-                rel_path=rel_path,
-                use_strict=use_strict,
-                expected_negative='negative' in metadata,
-            ))
+    for vm_version in commits:
+        print('Testing VM version:', vm_version)
 
-        flags = metadata.get('flags', []) or []
-        if 'onlyStrict' not in flags:
-            submit_task(use_strict=False)
-        if 'noStrict' not in flags:
-            submit_task(use_strict=True)
+        out = original_out
+        out = out.replace('%v', vm_version)
+        if out.endswith('/'):
+            out += 'out'
+        if not out.endswith('.jsonl'):
+            out = out + '.jsonl'
+        out = Path(out)
 
-    async def collect_results():
-        with out.open('w') as out_file:
-            for get_result in asyncio.as_completed(tasks):
-                result = await get_result
-                json_line = json.dumps(result)
-                # MUST be all on a single line
-                assert '\n' not in json_line
-                print(json_line, file=out_file)
+        if commits_filename:
+            try:
+                switch_to_version(
+                    src_dir=mcjs,
+                    vm_version=vm_version,
+                )
+            except VersionSwitchError:
+                with contextlib.redirect_stdout(out.open('w')):
+                    print('# ' + json.dumps({
+                        'error': 'vm build error',
+                        'version': vm_version,
+                    }))
+                continue
 
-        with out.open('rb') as out_file:
-            gz_filename = str(out) + '.gz'
-            with gzip.open(gz_filename, 'wb') as compressed_file:
-                shutil.copyfileobj(out_file, compressed_file)
+        out.parent.mkdir(exist_ok=True)
+        if out.exists() and not force:
+            raise RuntimeError('Results file already exists: ' + str(out))
 
-        out.unlink()
+        testcase_semaphore = asyncio.Semaphore(max_jobs)
+        async def call_limited(func, *args, **kwargs):
+            async with testcase_semaphore:
+                return await func(*args, **kwargs)
 
-    asyncio.run(collect_results())
-    print(f'Finished. {len(tasks)} results written to {out}')
+        runner = Runner(
+            test262_path=test262_path,
+            vm_version=vm_version,
+            mcjs=mcjs,
+        )
+        tasks = []
+        for rel_path, testcase in testcases.items():
+            metadata = testcase['metadata'] or {}
+
+            def submit_task(use_strict):
+                tasks.append(call_limited(
+                    runner.run_test,
+                    rel_path=rel_path,
+                    use_strict=use_strict,
+                    expected_negative='negative' in metadata,
+                ))
+
+            flags = metadata.get('flags', []) or []
+            if 'onlyStrict' not in flags:
+                submit_task(use_strict=False)
+            if 'noStrict' not in flags:
+                submit_task(use_strict=True)
+
+        async def collect_results():
+            with out.open('w') as out_file:
+                for get_result in asyncio.as_completed(tasks):
+                    result = await get_result
+                    json_line = json.dumps(result)
+                    # MUST be all on a single line
+                    assert '\n' not in json_line
+                    print(json_line, file=out_file)
+
+            with out.open('rb') as out_file:
+                gz_filename = str(out) + '.gz'
+                with gzip.open(gz_filename, 'wb') as compressed_file:
+                    shutil.copyfileobj(out_file, compressed_file)
+
+            out.unlink()
+
+        asyncio.run(collect_results())
+        print(f'Finished. {len(tasks)} results written to {out}.gz')
 
 
 def mk_cmd(files, use_strict):
@@ -148,6 +183,26 @@ def mk_cmd(files, use_strict):
         cmd.append('--force-last-strict')
     cmd += [str(p) for p in files]
     return cmd
+
+
+class VersionSwitchError(RuntimeError):
+    pass
+
+def switch_to_version(src_dir, vm_version):
+    with contextlib.chdir(src_dir):
+        print('Checking out commit...')
+        subprocess.run(
+            ['git', 'checkout', vm_version],
+            check=True,
+        )
+        print('Rebuilding...')
+        try:
+            subprocess.run(
+                ['cargo', 'build', '-p', 'mcjs_test262'],
+                check=True,
+            )
+        except subprocess.CalledProcessError as err:
+            raise VersionSwitchError() from err
 
 
 class Runner:
@@ -207,7 +262,7 @@ class Runner:
         output['use_strict'] = use_strict
         return output
 
-    
+
 
 if __name__ == '__main__':
     app()
