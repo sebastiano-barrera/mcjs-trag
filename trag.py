@@ -60,8 +60,9 @@ def scan(cases_filename, test262_path, out):
 @app.command(help='Run a set of test cases')
 @click.option('--mcjs', type=Path, required=True, help='Path to mcjs repo')
 @click.option('-o', '--out', type=Path, required=True, help='Results directory')
+@click.option('--force/--no-force', help='Overwrite results file if it exists')
 @click.argument('testrun_filename', metavar='testrun.json')
-def run(testrun_filename, mcjs, out):
+def run(testrun_filename, mcjs, out, force):
     import json
     import contextlib
     import subprocess
@@ -83,8 +84,10 @@ def run(testrun_filename, mcjs, out):
     print('Testing VM version:', vm_version)
 
     out.mkdir(exist_ok=True)
-    out_filename = f'{vm_version}.jsonl'    
-    out_file = (out / out_filename).open('w')
+    out_filename = out / f'{vm_version}.jsonl'
+    if out_filename.exists() and not force:
+        raise RuntimeError('Results file already exists: ' + str(out_filename))
+    out_file = out_filename.open('w')
 
     results_count = 0
     for rel_path, testcase in testcases.items():
@@ -166,7 +169,7 @@ def run(testrun_filename, mcjs, out):
         if results_count >= 10:
             break
 
-    print(f'Finished. {results_count} results written to {out_file.name}')
+    print(f'Finished. {results_count} results written to {out_filename}')
     
 
         
