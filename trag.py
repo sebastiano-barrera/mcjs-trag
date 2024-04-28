@@ -230,22 +230,38 @@ class Runner:
             'strict' if use_strict else 'sloppy',
             rel_path,
         ))
-        stdout, stderr = await process.communicate()
-        try:
-            error_message = stdout.decode('utf8')
-        except UnicodeDecodeError:
-            error_message = '<# encoding error #>'
 
-        if process.returncode != 0:
-            # runner failure
+        output = None
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=5.0,
+            )
+        except TimeoutError:
+            process.kill()
             output = {
                 'error': {
-                    'category': 'runner failure',
-                    'message': error_message,
-                }
+                    'category': 'timeout',
+                    'message': 'runner timed out',
+                },
             }
         else:
-            output = json.loads(stdout)
+            if process.returncode != 0:
+                # runner failure
+                try:
+                    error_message = stdout.decode('utf8')
+                except UnicodeDecodeError:
+                    error_message = '<# encoding error #>'
+                output = {
+                    'error': {
+                        'category': 'runner failure',
+                        'message': error_message,
+                    }
+                }
+            else:
+                # use the last line of stdout (a handful of versions emit some garbage on stdout)
+                stdout_lines = stdout.splitlines()
+                output = json.loads(stdout_lines[-1])
 
         if expected_negative:
             # TODO handle the different categories of expected errors
