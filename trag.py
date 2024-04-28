@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 
 import click
+
 from pathlib import Path
-
-
-class Context:
-    def __init__(self):
-        pass
+from pprint import pprint
+import asyncio
+import contextlib
+import json
+import subprocess
+import gzip
+import shutil
 
 @click.group()
 def app():
     pass
+
 
 @app.command(
     short_help='Scan a test262 repo directory.',
@@ -21,12 +25,12 @@ def app():
 def scan(cases_filename, test262_path, out):
     import yaml
     import json
-    
+
     testcases = {}
 
     for rel_path in open(cases_filename):
         rel_path = rel_path.strip()
-        
+
         path = test262_path / rel_path
         print(path)
 
@@ -52,26 +56,22 @@ def scan(cases_filename, test262_path, out):
         test262_path=str(test262_path),
         testcases=testcases,
     )
-        
+
     with open(out, 'w') as f:
         json.dump(root, fp=f, indent=2)
 
 
 @app.command(help='Run a set of test cases')
 @click.option('--mcjs', type=Path, required=True, help='Path to mcjs repo')
-@click.option('-o', '--out', type=Path, required=True, help='Results directory')
+@click.option('-o', '--out', required=True, help='Results directory')
 @click.option('--force/--no-force', help='Overwrite results file if it exists')
+@click.option('-j', '--max-jobs', default=10, type=int, help='Limit the max number of concurrent tests running at any given time')
 @click.argument('testrun_filename', metavar='testrun.json')
-def run(testrun_filename, mcjs, out, force):
-    import json
-    import contextlib
-    import subprocess
-    from pprint import pprint
-    
-    testrun = json.load(open(testrun_filename))
-
-    test262_path = Path(testrun['test262_path'])
-    testcases = testrun['testcases']
+def run(testrun_filename, mcjs, out, force, max_jobs):
+    with open(testrun_filename) as testrun_file:
+        testrun = json.load(testrun_file)
+        test262_path = Path(testrun['test262_path'])
+        testcases = testrun['testcases']
 
     with contextlib.chdir(mcjs):
         vm_version = subprocess.run(
@@ -83,97 +83,131 @@ def run(testrun_filename, mcjs, out, force):
 
     print('Testing VM version:', vm_version)
 
-    out.mkdir(exist_ok=True)
-    out_filename = out / f'{vm_version}.jsonl'
-    if out_filename.exists() and not force:
-        raise RuntimeError('Results file already exists: ' + str(out_filename))
-    out_file = out_filename.open('w')
+    out = out.replace('%v', vm_version)
+    if out.endswith('/'):
+        out += 'out'
+    if not out.endswith('.jsonl'):
+        out = out + '.jsonl'
+    out = Path(out)
 
-    results_count = 0
-    for rel_path, testcase in testcases.items():
-        metadata = testcase['metadata']
-        files = [
-            test262_path / 'harness/sta.js',
-            test262_path / 'harness/assert.js',
-            test262_path / rel_path,
-        ]
- 
-        def mk_cmd(use_strict):
-            cmd = [
-                'cargo',
-                'run',
-                '-p',
-                'mcjs_test262',
-                '--',
-            ]
-            if use_strict:
-                cmd.append('--force-last-strict')
-            cmd += [str(p) for p in files]
-            return cmd
+    out.parent.mkdir(exist_ok=True)
+    if out.exists() and not force:
+        raise RuntimeError('Results file already exists: ' + str(out))
 
-        def run_test_inner(use_strict):
-            result = subprocess.run(
-                mk_cmd(use_strict=use_strict),
-                cwd=mcjs,
-                capture_output=True,
-            )
-
-            if result.returncode != 0:
-                # runner failure
-                try:
-                    error_message = result.stdout.decode('utf8')
-                except UnicodeDecodeError:
-                    error_message = '<# encoding error #>'
-                    
-                return {
-                    'error': {
-                        'category': 'runner failure',
-                        'message': error_message,
-                    }
-                }
-
-            output = json.loads(result.stdout)
-            return output
-
-        def run_test(use_strict):
-            output = run_test_inner(use_strict)
-            if 'negative' in metadata:
-                # TODO handle the different categories of expected errors
-                if output['error'] is None:
-                    output['error'] = {
-                        'category': 'unexpected success',
-                        'message': 'error expected, but test run fine',
-                    }
-                else:
-                    output['error'] = None
-            output['testcase'] = rel_path
-            output['version'] = vm_version
-            output['use_strict'] = use_strict
-            return output
-
-        def emit_result(result):
-            nonlocal results_count
-            results_count += 1
-            json_line = json.dumps(result)
-            assert '\n' not in json_line
-            print(json_line, file=out_file)
+    testcase_semaphore = asyncio.Semaphore(max_jobs)
+    async def call_limited(func, *args, **kwargs):
+        async with testcase_semaphore:
+            return await func(*args, **kwargs)
         
-        flags = metadata.get('flags', [])
+    runner = Runner(
+        test262_path=test262_path,
+        vm_version=vm_version,
+        mcjs=mcjs,
+    )
+    tasks = []
+    for rel_path, testcase in testcases.items():
+        metadata = testcase['metadata'] or {}
 
+        def submit_task(use_strict):
+            tasks.append(call_limited(
+                runner.run_test,
+                rel_path=rel_path,
+                use_strict=use_strict,
+                expected_negative='negative' in metadata,
+            ))
+
+        flags = metadata.get('flags', []) or []
         if 'onlyStrict' not in flags:
-            emit_result(run_test(use_strict=False))
-
+            submit_task(use_strict=False)
         if 'noStrict' not in flags:
-            emit_result(run_test(use_strict=True))
+            submit_task(use_strict=True)
 
-        if results_count >= 10:
-            break
+    async def collect_results():
+        with out.open('w') as out_file:
+            for get_result in asyncio.as_completed(tasks):
+                result = await get_result
+                json_line = json.dumps(result)
+                # MUST be all on a single line
+                assert '\n' not in json_line
+                print(json_line, file=out_file)
 
-    print(f'Finished. {results_count} results written to {out_filename}')
+        with out.open('rb') as out_file:
+            gz_filename = str(out) + '.gz'
+            with gzip.open(gz_filename, 'wb') as compressed_file:
+                shutil.copyfileobj(out_file, compressed_file)
+
+        out.unlink()
+
+    asyncio.run(collect_results())
+    print(f'Finished. {len(tasks)} results written to {out}')
+
+
+def mk_cmd(files, use_strict):
+    cmd = ['./target/debug/mcjs_test262']
+    if use_strict:
+        cmd.append('--force-last-strict')
+    cmd += [str(p) for p in files]
+    return cmd
+
+
+class Runner:
+    def __init__(self, **kwargs):
+        for name in 'test262_path mcjs vm_version'.split():
+            setattr(self, name, kwargs[name])
+
+    async def run_test(self, rel_path, use_strict, expected_negative=False):
+        files = [
+            self.test262_path / 'harness/sta.js',
+            self.test262_path / 'harness/assert.js',
+            self.test262_path / rel_path,
+        ]
+        cmd = mk_cmd(files=files, use_strict=use_strict)
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=self.mcjs,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        print('starting ({}): {}'.format(
+            'strict' if use_strict else 'sloppy',
+            rel_path,
+        ))
+        stdout, stderr = await process.communicate()
+        try:
+            error_message = stdout.decode('utf8')
+        except UnicodeDecodeError:
+            error_message = '<# encoding error #>'
+
+        if process.returncode != 0:
+            # runner failure
+            output = {
+                'error': {
+                    'category': 'runner failure',
+                    'message': error_message,
+                }
+            }
+        else:
+            output = json.loads(stdout)
+
+        if expected_negative:
+            # TODO handle the different categories of expected errors
+            if output['error'] is None:
+                output['error'] = {
+                    'category': 'unexpected success',
+                    'message': 'error expected, but test run fine',
+                }
+            else:
+                output['error'] = None
+
+        output['testcase'] = rel_path
+        output['version'] = self.vm_version
+        output['use_strict'] = use_strict
+        return output
+
     
 
-        
 if __name__ == '__main__':
     app()
-
-
