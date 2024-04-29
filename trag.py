@@ -231,11 +231,6 @@ class Runner:
             stderr=subprocess.PIPE,
         )
 
-        print('starting ({}): {}'.format(
-            'strict' if use_strict else 'sloppy',
-            rel_path,
-        ))
-
         output = None
         try:
             stdout, stderr = await asyncio.wait_for(
