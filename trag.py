@@ -11,6 +11,8 @@ import json
 import re
 import shutil
 import subprocess
+import sqlite3
+import os.path
 
 @click.group()
 def app():
@@ -278,6 +280,93 @@ class Runner:
         output['use_strict'] = use_strict
         return output
 
+
+@app.command()
+@click.option('--db', 'db_filename', required=True, help='Database file.  Will be created if it doesn''t exist.')
+@click.argument('data_filenames', nargs=-1)
+def ingest(db_filename, data_filenames):
+    db = sqlite3.connect(db_filename, autocommit=False)
+    db.isolation_level = 'EXCLUSIVE'
+
+    db.executescript('''
+    create table if not exists strings
+      ( string_id integer primary key autoincrement
+      , string varchar not null unique
+      );
+    create table if not exists groups
+      ( path_sid unique references strings (string_id)
+      , group_sid references strings (string_id)
+      );
+    create table if not exists runs
+      ( testcase_sid not null references strings (string_id)
+      , error_category varchar
+      , error_message_sid references strings (string_id)
+      , use_strict tinyint not null
+      , version char(40) not null
+      );
+
+    create index if not exists runs__version on runs (version);
+
+    delete from groups;
+    delete from runs;
+    ''')
+
+    def insert_string(s):
+        db.execute('insert or ignore into strings (string) values (?)', [s])
+        res = db.execute('select string_id from strings where string = ?', [s])
+        return res.fetchone()[0]
+
+    for data_filename in data_filenames:
+        print(data_filename)
+
+        input = open(data_filename, 'rb')
+        if data_filename.endswith('.gz'):
+            input = gzip.open(input)
+
+        try:
+            line_count = 0
+            for line in input:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    print('(invalid JSON; skipping)')
+                    continue
+
+                group = os.path.dirname(record['testcase'])
+                group_sid = insert_string(group)
+                testcase_sid = insert_string(record['testcase'])
+
+                error = record.get('error')
+                if error is None:
+                    error_message_sid = None
+                    error_category = None
+                else:
+                    error_message_sid = insert_string(record['error']['message'])
+                    error_category = record['error']['category']
+
+                db.execute(
+                    'insert or ignore into groups (path_sid, group_sid) values (?, ?)',
+                    (testcase_sid, group_sid)
+                )
+
+                db.execute(
+                    'insert into runs (testcase_sid, error_category, error_message_sid, use_strict, version) '
+                    + 'values (?, ?, ?, ?, ?)',
+                    ( testcase_sid
+                    , error_category
+                    , error_message_sid
+                    , record['use_strict']
+                    , record['version']
+                    )
+                )
+
+                line_count += 1
+
+        finally:
+            input.close()
+
+    db.commit()
+    print('transaction committed.')
 
 
 if __name__ == '__main__':
