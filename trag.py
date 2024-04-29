@@ -65,7 +65,7 @@ def scan(cases_filename, test262_path, out):
 @app.command(help='Run a set of test cases')
 @click.option('--mcjs', type=Path, required=True, help='Path to mcjs repo')
 @click.option('-o', '--out', required=True, help='Results directory')
-@click.option('--force/--no-force', help='Overwrite results file if it exists')
+@click.option('--force/--no-force', help='Overwrite results file if it exists (default: skip)')
 @click.option('-j', '--max-jobs', default=10, type=int, help='Limit the max number of concurrent tests running at any given time')
 @click.option('--commits', 'commits_filename', help='Checkout and test the commits listed in the given file.')
 @click.argument('testrun_filename', metavar='testrun.json')
@@ -101,6 +101,7 @@ def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
     original_out = out
 
     for vm_version in commits:
+        print('---')
         print('Testing VM version:', vm_version)
 
         out = original_out
@@ -110,6 +111,13 @@ def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
         if not out.endswith('.jsonl'):
             out = out + '.jsonl'
         out = Path(out)
+        out_compressed = Path(str(out) + '.gz')
+
+        print('out file:', out)
+
+        if out_compressed.exists() and not force:
+            print('file already exists, skipping task')
+            continue
 
         if commits_filename:
             try:
@@ -126,8 +134,6 @@ def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
                 continue
 
         out.parent.mkdir(exist_ok=True)
-        if out.exists() and not force:
-            raise RuntimeError('Results file already exists: ' + str(out))
 
         testcase_semaphore = asyncio.Semaphore(max_jobs)
         async def call_limited(func, *args, **kwargs):
@@ -167,8 +173,7 @@ def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
                     print(json_line, file=out_file)
 
             with out.open('rb') as out_file:
-                gz_filename = str(out) + '.gz'
-                with gzip.open(gz_filename, 'wb') as compressed_file:
+                with gzip.open(str(out_compressed), 'wb') as compressed_file:
                     shutil.copyfileobj(out_file, compressed_file)
 
             out.unlink()
