@@ -6,13 +6,18 @@ from pathlib import Path
 from pprint import pprint
 import asyncio
 import contextlib
+import functools
 import gzip
-import json
+try:
+    # significantly faster!
+    import ujson as json
+except ImportError:
+    import json
+import os.path
 import re
 import shutil
-import subprocess
 import sqlite3
-import os.path
+import subprocess
 
 @click.group()
 def app():
@@ -286,7 +291,6 @@ class Runner:
 @click.argument('data_filenames', nargs=-1)
 def ingest(db_filename, data_filenames):
     db = sqlite3.connect(db_filename, autocommit=False)
-    db.isolation_level = 'EXCLUSIVE'
 
     db.executescript('''
     create table if not exists strings
@@ -305,67 +309,62 @@ def ingest(db_filename, data_filenames):
       , version char(40) not null
       );
 
-    create index if not exists runs__version on runs (version);
-
     delete from groups;
     delete from runs;
     ''')
 
+    @functools.cache
     def insert_string(s):
         db.execute('insert or ignore into strings (string) values (?)', [s])
-        res = db.execute('select string_id from strings where string = ?', [s])
+        res = db.execute('select last_insert_rowid()')
         return res.fetchone()[0]
 
-    for data_filename in data_filenames:
-        print(data_filename)
+    def insert_run(record):
+        group = os.path.dirname(record['testcase'])
+        group_sid = insert_string(group)
+        testcase_sid = insert_string(record['testcase'])
 
-        input = open(data_filename, 'rb')
-        if data_filename.endswith('.gz'):
-            input = gzip.open(input)
+        error = record.get('error')
+        if error is None:
+            error_message_sid = None
+            error_category = None
+        else:
+            error_message_sid = insert_string(record['error']['message'])
+            error_category = record['error']['category']
 
-        try:
-            line_count = 0
-            for line in input:
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    print('(invalid JSON; skipping)')
-                    continue
+        db.execute(
+            'insert or ignore into groups (path_sid, group_sid) values (?, ?)',
+            (testcase_sid, group_sid)
+        )
+        db.execute(
+            'insert into runs (testcase_sid, error_category, error_message_sid, use_strict, version) '
+            + 'values (?, ?, ?, ?, ?)',
+            ( testcase_sid
+            , error_category
+            , error_message_sid
+            , record['use_strict']
+            , record['version']
+            )
+        )
 
-                group = os.path.dirname(record['testcase'])
-                group_sid = insert_string(group)
-                testcase_sid = insert_string(record['testcase'])
+    with db:
+        for data_filename in data_filenames:
+            print(data_filename)
 
-                error = record.get('error')
-                if error is None:
-                    error_message_sid = None
-                    error_category = None
-                else:
-                    error_message_sid = insert_string(record['error']['message'])
-                    error_category = record['error']['category']
+            input = open(data_filename, 'rb')
+            if data_filename.endswith('.gz'):
+                input = gzip.open(input)
 
-                db.execute(
-                    'insert or ignore into groups (path_sid, group_sid) values (?, ?)',
-                    (testcase_sid, group_sid)
-                )
+            with input:
+                for line in input:
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        print('(invalid JSON; skipping line)')
+                        continue
 
-                db.execute(
-                    'insert into runs (testcase_sid, error_category, error_message_sid, use_strict, version) '
-                    + 'values (?, ?, ?, ?, ?)',
-                    ( testcase_sid
-                    , error_category
-                    , error_message_sid
-                    , record['use_strict']
-                    , record['version']
-                    )
-                )
+                    insert_run(record)
 
-                line_count += 1
-
-        finally:
-            input.close()
-
-    db.commit()
     print('transaction committed.')
 
 
