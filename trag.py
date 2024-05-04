@@ -92,14 +92,8 @@ def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
             raise RuntimeError('The output file (passed with --out) must include "%v" so that a new file per version is created.')
 
     else:
-        with contextlib.chdir(mcjs):
-            vm_version = subprocess.run(
-                ['git', 'rev-parse', 'HEAD'],
-                check=True,
-                capture_output=True,
-                encoding='utf8'
-            ).stdout.strip()
-            commits = [vm_version]
+        vm_version = get_version_of_repo(mcjs)
+        commits = [vm_version]
 
     for commit in commits:
         if not re.match(r'^[a-f0-9]+$', commit):
@@ -187,6 +181,16 @@ def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
 
         asyncio.run(collect_results())
         print(f'Finished. {len(tasks)} results written to {out}.gz')
+
+
+def get_version_of_repo(root):
+    with contextlib.chdir(root):
+        return subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            check=True,
+            capture_output=True,
+            encoding='utf8'
+        ).stdout.strip()
 
 
 def mk_cmd(files, use_strict):
@@ -286,7 +290,7 @@ class Runner:
         return output
 
 
-@app.command()
+@app.command(help='Ingest .jsonl data into a SQLite database (.db)')
 @click.option('--db', 'db_filename', required=True, help='Database file.  Will be created if it doesn''t exist.')
 @click.argument('data_filenames', nargs=-1)
 def ingest(db_filename, data_filenames):
@@ -367,6 +371,108 @@ def ingest(db_filename, data_filenames):
                     insert_run(record)
 
     print('transaction committed.')
+
+
+@app.command(help='Overview of test results')
+@click.option('--db', 'db_filename', required=True, help='Database file')
+@click.option('--version', help='mcjs version for which to summarize test results')
+@click.option('--mcjs', 'mcjs_root', help='gather version from this directory where the mcjs repository is located')
+def status(db_filename, version, mcjs_root):
+    from tabulate import tabulate
+
+    if not os.path.exists(db_filename):
+        print(f'error: {db_filename}: No such file or directory')
+        os.exit(1)
+
+    if version is None:
+        if mcjs_root is None:
+            print('pass either --version or --mcjs.')
+            os.exit(1)
+
+        version = get_version_of_repo(mcjs_root)
+
+    db = sqlite3.connect(db_filename)
+    res = db.execute('''
+        with q as (
+            select g.group_sid, iif(error_message_sid is null, 1, 0) as success
+            from runs r, groups g
+            where r.version = ?
+            and r.testcase_sid = g.path_sid
+        )
+        , q2 as (
+            select sg.string as grp
+            , sum(q.success) as ok
+            , count(*) as total
+            from q, strings sg
+            where sg.string_id = q.group_sid
+            group by q.group_sid
+            order by grp
+        )
+        select q2.grp, cast(ok as real) / total * 100 as perc
+        from q2
+    ''', (version, ))
+
+    rows = res.fetchall()
+    # each item is a weird 7-tuple for obscure compatibility reasons
+    columns = [t[0] for t in res.description]
+
+    print(tabulate(rows, headers=columns))
+
+
+
+@app.command(help='Compare test results between versions')
+@click.option('--db', 'db_filename', required=True, help='Database file')
+@click.argument('version_a')
+@click.argument('version_b')
+def diff(db_filename, version_a, version_b):
+    if not os.path.exists(db_filename):
+        print(f'error: {db_filename}: No such file or directory')
+        os.exit(1)
+
+    db = sqlite3.connect(db_filename)
+
+    res = db.execute('''
+        select st.string as testcase, se.string as error_message
+        from runs a, runs b, strings st, strings se
+        where a.testcase_sid = b.testcase_sid
+        and a.use_strict = b.use_strict
+        and a.version = 'bb2bfec12be9eb11c8dac52fea9ac414bc985635'
+        and b.version = '824be526758c2756b4bee85959f208532901c50d'
+        and a.error_message_sid is null
+        and b.error_message_sid is not null
+        and st.string_id = a.testcase_sid
+        and se.string_id = b.error_message_sid
+        order by testcase
+    ''')
+    new_failures = res.fetchall()
+
+    print('Failures introduced:', len(new_failures))
+    for (testcase, error_message) in new_failures:
+         print(' * ' + testcase)
+
+         for line in error_message.splitlines():
+             print('    | ' + line)
+
+
+    res = db.execute('''
+        select st.string as testcase
+        from runs a, runs b, strings st
+        where a.testcase_sid = b.testcase_sid
+        and a.use_strict = b.use_strict
+        and a.version = 'bb2bfec12be9eb11c8dac52fea9ac414bc985635'
+        and b.version = '824be526758c2756b4bee85959f208532901c50d'
+        and a.error_message_sid is not null
+        and b.error_message_sid is null
+        and st.string_id = a.testcase_sid
+        order by testcase
+    ''')
+    new_successes = res.fetchall()
+
+    print()
+    print('Failures fixed:', len(new_successes))
+    for (testcase, ) in new_successes:
+         print(' * ' + testcase)
+
 
 
 if __name__ == '__main__':
