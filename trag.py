@@ -315,8 +315,9 @@ def ingest(db_filename, data_filenames):
 
     @functools.cache
     def insert_string(s):
+        # there must be a better way...
         db.execute('insert or ignore into strings (string) values (?)', [s])
-        res = db.execute('select last_insert_rowid()')
+        res = db.execute('select string_id from strings where string = ?', [s])
         return res.fetchone()[0]
 
     def insert_run(record):
