@@ -419,6 +419,64 @@ def status(db_filename, version, mcjs_root):
     print(tabulate(rows, headers=columns))
 
 
+@app.command(help='List detailed test case results')
+@click.option('--db', 'db_filename', required=True, help='Database file')
+@click.option('--version', help='mcjs version for which to summarize test results')
+@click.option('--mcjs', 'mcjs_root', help='gather version from this directory where the mcjs repository is located')
+@click.option('--outcome', help='Only show test cases with the given outcome (passed, failed)')
+@click.option('--filter', default='', help='Only show test cases whose path contains this string')
+@click.option('--errors/--no-errors', 'show_errors', help='Show error messages')
+def list(db_filename, version, mcjs_root, outcome, filter, show_errors):
+    from tabulate import tabulate
+
+    if not os.path.exists(db_filename):
+        print(f'error: {db_filename}: No such file or directory')
+        return
+
+    if version is None:
+        if mcjs_root is None:
+            print('error: pass either --version or --mcjs.')
+            return
+
+        version = get_version_of_repo(mcjs_root)
+
+    db = sqlite3.connect(db_filename)
+    query = '''
+        select (error_message_sid is null) as success
+        , use_strict
+        , st.string as testcase
+        , se.string as error_msg
+        from runs, strings st, strings se
+        where st.string_id = testcase_sid
+        and se.string_id = error_message_sid
+        and version = ?
+        and testcase like '%' || ? || '%'
+    '''
+    args = [version, filter]
+    if outcome in ('passed', 'failed'):
+        query += 'and success = ?'
+        args += [1 if outcome == 'passed' else 0]
+    elif outcome is not None:
+        print('invalid value for --outcome:', outcome)
+        os.exit(1)
+
+    res = db.execute(query, args)
+
+    success_s = {
+        0: 'failed',
+        1: 'passed',
+    }
+    use_strict_s = {
+        0: 'sloppy',
+        1: 'strict',
+    }
+
+    for (success, use_strict, testcase, error_msg) in res:
+        print('{:10} {:10} {}'.format(success_s[success], use_strict_s[use_strict], testcase))
+        if show_errors:
+            for line in error_msg.splitlines():
+                print('    | ' + line)
+
 
 @app.command(help='Compare test results between versions')
 @click.option('--db', 'db_filename', required=True, help='Database file')
