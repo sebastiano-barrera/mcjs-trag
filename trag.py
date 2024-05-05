@@ -25,7 +25,7 @@ def app():
 
 
 @app.command(
-    short_help='Scan a test262 repo directory.',
+    short_help='Scan a test262 repo directory',
     help='Scan a test262 repo directory (a clone of https://github.com/tc39/test262) and gather data about test cases.')
 @click.option('--cases', 'cases_filename', default='test-cases.txt', help='File listing test262 cases to run/scan/etc.')
 @click.option('-o', '--out', required=True, type=Path, help='Test run file written')
@@ -413,10 +413,7 @@ def status(db_filename, version, mcjs_root):
     ''', (version, ))
 
     rows = res.fetchall()
-    # each item is a weird 7-tuple for obscure compatibility reasons
-    columns = [t[0] for t in res.description]
-
-    print(tabulate(rows, headers=columns))
+    print(tabulate(rows, headers=['Group', '% Passing'], floatfmt='.1f'))
 
 
 @app.command(help='List detailed test case results')
