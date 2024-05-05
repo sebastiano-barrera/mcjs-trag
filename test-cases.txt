@@ -37,7 +37,6 @@ test/language/block-scope/syntax/for-in/disallow-multiple-lexical-bindings.js
 test/language/block-scope/syntax/for-in/disallow-multiple-lexical-bindings-with-and-without-initializer.js
 test/language/block-scope/syntax/for-in/disallow-multiple-lexical-bindings-with-initializer.js
 test/language/block-scope/syntax/for-in/disallow-multiple-lexical-bindings-without-and-with-initializer.js
-test/language/block-scope/syntax/for-in/mixed-values-in-iteration.js
 test/language/block-scope/syntax/function-declarations/in-statement-position-case-expression-statement-list.js
 test/language/block-scope/syntax/function-declarations/in-statement-position-default-statement-list.js
 test/language/block-scope/syntax/function-declarations/in-statement-position-do-statement-while-expression.js
