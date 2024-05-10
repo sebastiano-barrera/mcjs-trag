@@ -47,16 +47,16 @@ def main(db_filename, commits_filename, output_dir):
         json.dump({'commits': commits}, out)
 
     here = Path(__file__).parent
-    shutil.copy(
-        src=here / 'templates/dashboard/index.html',
-        dst=output_dir / 'index.html',
-    )
+    for src in (here / 'templates' / 'dashboard').glob('*'):
+        dst = output_dir / src.name
+        print('copy', src, dst)
+        shutil.copy(src=src, dst=dst)
 
     for ndx, commit_id in enumerate(commit_ids):
         output_path = output_dir / f'{commit_id}.json'
         if output_path.exists():
             continue
-            
+
         print(f'{ndx}/{len(commit_ids)}', end='\r')
         res = db.execute('''
             with q as (

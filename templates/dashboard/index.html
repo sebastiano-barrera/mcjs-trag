@@ -3,6 +3,73 @@
 <html>
   <head>
     <title>mcjs - Are we ECMAScript yet?</title>
+
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.js"></script>
+    <link rel="stylesheet" href="uPlot.min.css">
+    <script src="uPlot.iife.min.js"></script>
+
+    <script>
+      async function reloadCommits() {
+        const res = await fetch('/commits.json');
+        const data = await res.json();
+        for (const commit of data.commits) {
+          commit.commit_id_short = commit.commit_id.slice(0, 8);
+        }
+
+        const xs = [];
+        const ys = [];
+        for (let i=0; i < data.commits.length; ++i) {
+          const ndx = data.commits.length - 1 - i;
+          const commit = data.commits[ndx];
+          xs.push(i);
+          ys.push(100 * commit.n_success / commit.n_total);
+        }
+
+        return {
+          commits: data.commits,
+          trendData: [xs, ys]
+        };
+      }
+
+      async function fetchCommitDetails(commitID) {
+        const res = await fetch(`/${commitID}.json`);
+        return await res.json();
+      }
+
+      function resetChart(element, data) {
+        element.innerHTML = '';
+        const opts = {
+          id: 'the-chart',
+          legend: {show: false},
+          width: 220,
+          height: 150,
+          axes: [
+            { show: false },
+            { show: false },
+          ],
+          series: [
+            {
+            },
+            {
+              show: true,
+              stroke: '#0dcc72',
+              fill: '#032d19',
+              grid: {show: true},
+            },
+          ],
+          scales: {
+            x: {
+              time: false,
+            },
+            y: {
+              auto: false,
+              range: [0, 100],
+            },
+          },
+        };
+        const plot = new uPlot(opts, data, element);
+      }
+    </script>
     <style>
       html, body {
         background: #333;
@@ -13,12 +80,16 @@
         height: 100%;
         font-family: sans-serif;
         font-size: 8pt;
+
+        --status-green: #0dcc72;
+        --status-red: #a4423e;
       }
 
       #top-ctr {
         display: grid;
-        grid-template-rows: 8mm minmax(0, 1fr);
+        grid-template-rows: 8mm 32mm minmax(0, 1fr);
         grid-template-columns: 60mm minmax(0, 1fr);
+        grid-auto-flow: column;
       }
 
       #top-ctr .panel {
@@ -65,51 +136,49 @@
         font-family: monospace;
         text-align: right;
       }
-      
+      tr.current {
+        background: white !important;
+        color: black;
+      }
+
       .bar {
-        background: #a4423e;
+        background: var(--status-red);
         height: 1px;
         width: 3cm;
       }
       .bar-fill {
-        background: #0dcc72;
+        background: var(--status-green);
         height: 1px;
       }
 
       .cursor-pointer {
         cursor: pointer;
       }
+
+      .title {
+        font-size: 5mm;
+      }
+      .title a {
+        color: var(--status-green);
+      }
     </style>
-
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.js"></script>
-    <script>
-      async function reloadCommits() {
-        const res = await fetch('/commits.json');
-        const data = await res.json();
-        for (const commit of data.commits) {
-          commit.commit_id_short = commit.commit_id.slice(0, 8);
-        }
-        return data.commits;
-      }
-
-      async function fetchCommitDetails(commitID) {
-        const res = await fetch(`/${commitID}.json`);
-        return await res.json();
-      }
-    </script>
   </head>
 
   <body
     id="top-ctr" 
-    x-data="{ focusCommit: null }"
-    @commitSelected="focusCommit = await fetchCommitDetails($event.detail)"
+    x-data="{ focusCommitID: null, focusCommit: null, trendData: [] }"
+    @commitSelected="focusCommitID = $event.detail; focusCommit = await fetchCommitDetails(focusCommitID)"
   >
-    <div style="grid-column: 1 / -1">
-      Are we ECMAScript yet?
+    <div
+      id="chart"
+      style="grid-row: 1 / 3"
+      x-effect="resetChart($el, trendData)"
+    >
     </div>
+    
     <div
       x-data="{ commits: [] }"
-      x-init="commits = reloadCommits()"
+      x-init="{commits, trendData} = await reloadCommits()"
       class="panel"
     >
       <table>
@@ -122,7 +191,11 @@
 
         <tbody>
           <template x-for="commit in commits">
-            <tr class="cursor-pointer" @click="$dispatch('commitselected', commit.commit_id)">
+            <tr
+              class="cursor-pointer" 
+              :class="focusCommitID === commit.commit_id ? 'current' : ''"
+              @click="$dispatch('commitselected', commit.commit_id)"
+            >
               <td><span class="version" x-text="commit.commit_id_short"></span></td>
               <td class="number">
                 <span x-text="commit.n_success"></span>
@@ -133,7 +206,12 @@
         </tbody>
       </table>
     </div>
-    <div class="panel">
+    
+    <div class="title">
+      <a href="https://github.com/sebastiano-barrera/mcjs/">mcjs</a>: <i>Are we ECMAScript yet?</i>
+    </div>
+
+    <div class="panel" style="grid-row: 2 / -1">
       <template x-if="focusCommit === null">
         <div>
           (Select a commit)
