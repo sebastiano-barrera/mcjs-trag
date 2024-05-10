@@ -10,7 +10,7 @@
 
     <script>
       async function reloadCommits() {
-        const res = await fetch('/commits.json');
+        const res = await fetch('commits.json');
         const data = await res.json();
         for (const commit of data.commits) {
           commit.commit_id_short = commit.commit_id.slice(0, 8);
@@ -32,7 +32,7 @@
       }
 
       async function fetchCommitDetails(commitID) {
-        const res = await fetch(`/${commitID}.json`);
+        const res = await fetch(`${commitID}.json`);
         return await res.json();
       }
 
