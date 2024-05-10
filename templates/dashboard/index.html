@@ -214,7 +214,7 @@
     <div class="panel" style="grid-row: 2 / -1">
       <template x-if="focusCommit === null">
         <div>
-          (Select a commit)
+          Select a commit.
         </div>
       </template>
 
@@ -223,6 +223,7 @@
           <thead>
             <tr>
               <th>group</th>
+              <th>%</th>
               <th>OK</th>
               <th>fail</th>
               <th></th>
@@ -232,6 +233,7 @@
             <template x-for="group in focusCommit.groups">
               <tr>
                 <td x-text="group.path"></td>
+                <td class="number" x-text="(100.0 * group.n_ok / (group.n_ok + group.n_fail)).toFixed(1)"></td>
                 <td class="number" x-text="group.n_ok"></td>
                 <td class="number" x-text="group.n_fail"></td>
                 <td>
