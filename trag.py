@@ -292,8 +292,9 @@ class Runner:
 
 @app.command(help='Ingest .jsonl data into a SQLite database (.db)')
 @click.option('--db', 'db_filename', required=True, help='Database file.  Will be created if it doesn''t exist.')
+@click.option('--clear/--no-clear', help='Clear previous runs from the database.')
 @click.argument('data_filenames', nargs=-1)
-def ingest(db_filename, data_filenames):
+def ingest(db_filename, data_filenames, clear):
     db = sqlite3.connect(db_filename, autocommit=False)
 
     db.executescript('''
@@ -312,10 +313,14 @@ def ingest(db_filename, data_filenames):
       , use_strict tinyint not null
       , version char(40) not null
       );
-
-    delete from groups;
-    delete from runs;
     ''')
+
+    if clear:
+        print('clear: deleting previous records (will be un-deleted if anything fails)')
+        db.executescript('''
+            delete from groups;
+            delete from runs;
+        ''')
 
     @functools.cache
     def insert_string(s):
