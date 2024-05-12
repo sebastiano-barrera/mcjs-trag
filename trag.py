@@ -246,7 +246,7 @@ class Runner:
         try:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
-                timeout=5.0,
+                timeout=10.0,
             )
         except TimeoutError:
             process.kill()
