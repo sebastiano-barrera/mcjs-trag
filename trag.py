@@ -491,14 +491,14 @@ def diff(db_filename, version_a, version_b):
         from runs a, runs b, strings st, strings se
         where a.testcase_sid = b.testcase_sid
         and a.use_strict = b.use_strict
-        and a.version = 'bb2bfec12be9eb11c8dac52fea9ac414bc985635'
-        and b.version = '824be526758c2756b4bee85959f208532901c50d'
+        and a.version = ?
+        and b.version = ?
         and a.error_message_sid is null
         and b.error_message_sid is not null
         and st.string_id = a.testcase_sid
         and se.string_id = b.error_message_sid
         order by testcase
-    ''')
+    ''', (version_a, version_b))
     new_failures = res.fetchall()
 
     print('Failures introduced:', len(new_failures))
@@ -514,13 +514,13 @@ def diff(db_filename, version_a, version_b):
         from runs a, runs b, strings st
         where a.testcase_sid = b.testcase_sid
         and a.use_strict = b.use_strict
-        and a.version = 'bb2bfec12be9eb11c8dac52fea9ac414bc985635'
-        and b.version = '824be526758c2756b4bee85959f208532901c50d'
+        and a.version = ?
+        and b.version = ?
         and a.error_message_sid is not null
         and b.error_message_sid is null
         and st.string_id = a.testcase_sid
         order by testcase
-    ''')
+    ''', (version_a, version_b))
     new_successes = res.fetchall()
 
     print()
