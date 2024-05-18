@@ -72,11 +72,13 @@ def scan(cases_filename, test262_path, out):
 @app.command(help='Run a set of test cases')
 @click.option('--mcjs', type=Path, required=True, help='Path to mcjs repo')
 @click.option('-o', '--out', required=True, help='Results directory')
+@click.option('-f', '--filter', 'testcase_filter', help='Only run test cases whose path contains this substring')
+@click.option('-n', '--dry-run', is_flag=True, help='Only print the selected test cases; don\'t run anything')
 @click.option('--force/--no-force', help='Overwrite results file if it exists (default: skip)')
 @click.option('-j', '--max-jobs', default=10, type=int, help='Limit the max number of concurrent tests running at any given time')
 @click.option('--commits', 'commits_filename', help='Checkout and test the commits listed in the given file.')
 @click.argument('testrun_filename', metavar='testrun.json')
-def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
+def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename, testcase_filter, dry_run):
     with open(testrun_filename) as testrun_file:
         testrun = json.load(testrun_file)
         test262_path = Path(testrun['test262_path'])
@@ -120,7 +122,7 @@ def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
             print('file already exists, skipping task')
             continue
 
-        if commits_filename:
+        if commits_filename and not dry_run:
             try:
                 switch_to_version(
                     src_dir=mcjs,
@@ -150,13 +152,20 @@ def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
         for rel_path, testcase in testcases.items():
             metadata = testcase['metadata'] or {}
 
+            if testcase_filter is not None and testcase_filter not in rel_path:
+                continue
+
             def submit_task(use_strict):
-                tasks.append(call_limited(
-                    runner.run_test,
-                    rel_path=rel_path,
-                    use_strict=use_strict,
-                    expected_negative='negative' in metadata,
-                ))
+                if dry_run:
+                    use_strict = 'strict' if use_strict else 'sloppy'
+                    print(f'would run: {rel_path} ({use_strict})')
+                else:
+                    tasks.append(call_limited(
+                        runner.run_test,
+                        rel_path=rel_path,
+                        use_strict=use_strict,
+                        expected_negative='negative' in metadata,
+                    ))
 
             flags = metadata.get('flags', []) or []
             if 'onlyStrict' not in flags:
@@ -165,6 +174,9 @@ def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
                 submit_task(use_strict=True)
 
         async def collect_results():
+            if dry_run:
+                return
+
             with out.open('w') as out_file:
                 for get_result in asyncio.as_completed(tasks):
                     result = await get_result
@@ -179,7 +191,8 @@ def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename):
 
             out.unlink()
 
-        asyncio.run(collect_results())
+        if not dry_run:
+            asyncio.run(collect_results())
         print(f'Finished. {len(tasks)} results written to {out}.gz')
 
 
