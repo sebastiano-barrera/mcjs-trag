@@ -18,6 +18,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 
 @click.group()
 def app():
@@ -400,12 +401,12 @@ def status(db_filename, version, mcjs_root):
 
     if not os.path.exists(db_filename):
         print(f'error: {db_filename}: No such file or directory')
-        os.exit(1)
+        sys.exit(1)
 
     if version is None:
         if mcjs_root is None:
             print('pass either --version or --mcjs.')
-            os.exit(1)
+            sys.exit(1)
 
         version = get_version_of_repo(mcjs_root)
 
@@ -473,7 +474,7 @@ def list(db_filename, version, mcjs_root, outcome, filter, show_errors):
         args += [1 if outcome == 'passed' else 0]
     elif outcome is not None:
         print('invalid value for --outcome:', outcome)
-        os.exit(1)
+        sys.exit(1)
 
     res = db.execute(query, args)
 
@@ -500,7 +501,7 @@ def list(db_filename, version, mcjs_root, outcome, filter, show_errors):
 def diff(db_filename, version_a, version_b):
     if not os.path.exists(db_filename):
         print(f'error: {db_filename}: No such file or directory')
-        os.exit(1)
+        sys.exit(1)
 
     db = sqlite3.connect(db_filename)
 
