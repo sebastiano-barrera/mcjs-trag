@@ -24,50 +24,91 @@ import sys
 def app():
     pass
 
+# TODO
+#  [x] init instead of scan
+#  [ ] threads instead of async
+#  [ ] no data files outside of the SQLite database
+#  [ ] test cases list in a resource file, sibling to the script
+
+
+TESTCASES = [
+    line.strip()
+    for line in Path(__file__).parent.joinpath('test-cases.txt').open('r')
+]
+
+
 
 @app.command(
-    short_help='Scan a test262 repo directory',
-    help='Scan a test262 repo directory (a clone of https://github.com/tc39/test262) and gather data about test cases.')
-@click.option('--cases', 'cases_filename', default='test-cases.txt', help='File listing test262 cases to run/scan/etc.')
-@click.option('-o', '--out', required=True, type=Path, help='Test run file written')
-@click.option('--test262', 'test262_path', type=Path)
-def scan(cases_filename, test262_path, out):
-    import yaml
-    import json
+    short_help='Initialize a test data file',
+    help='Initialize a test data file and gather data about test cases.')
+@click.option('--test262', 'test262_path', required=True, type=Path, help='Path to a clone of https://github.com/tc39/test262')
+@click.option('--force/--no-force', help='Re-initialize an existing file, deleting all data (default: fail if file exists already)')
+@click.option('-f', '--file', 'data_file', type=Path, default='trag.data', help='Data file to write.')
+def init(test262_path, data_file, force):
+    if not force and data_file.exists():
+        raise RuntimeError(f'data file already exists: {data_file} (use --force to overwrite)')
 
-    testcases = {}
+    db = sqlite3.connect(data_file, autocommit=False)
 
-    for rel_path in open(cases_filename):
-        rel_path = rel_path.strip()
+    db.executescript('''
+    create table if not exists strings
+      ( string_id integer primary key autoincrement
+      , string varchar not null unique
+      );
+    create table if not exists groups
+      ( path_sid unique references strings (string_id)
+      , group_sid references strings (string_id)
+      );
+    create table if not exists runs
+      ( testcase_sid not null references strings (string_id)
+      , error_category varchar
+      , error_message_sid references strings (string_id)
+      , use_strict tinyint not null
+      , version char(40) not null
+      );
+    create table testcases
+      ( testcase_sid not null references strings (string_id)
+      , metadata varchar
+      );
+    ''')
 
-        path = test262_path / rel_path
-        print(path)
+    for rel_path in TESTCASES:
+        testcase_sid = insert_string(db, rel_path)
 
-        lines = iter(open(path))
+        full_text = (test262_path / rel_path).open().read()
+        metadata_raw = cut_metadata(full_text)
 
-        for line in lines:
-            if line.strip() == '/*---':
-                break
+        db.execute(
+            'insert into testcases (testcase_sid, metadata) values (?, ?)',
+            (testcase_sid, metadata_raw),
+        )
 
-        yml_metadata_lines = []
+        raise RuntimeError()
+        
+    db.commit()
 
-        for line in lines:
-            if line.strip() == '---*/':
-                break
-            yml_metadata_lines.append(line)
+@functools.cache
+def insert_string(db, s):
+    # there must be a better way...
+    db.execute('insert or ignore into strings (string) values (?)', [s])
+    res = db.execute('select string_id from strings where string = ?', [s])
+    return res.fetchone()[0]
 
-        metadata = yaml.safe_load('\n'.join(yml_metadata_lines))
-        if metadata is not None and 'es6id' in metadata:
-            metadata['es6id'] = str(metadata['es6id'])
-        testcases[rel_path] = dict(metadata=metadata)
 
-    root = dict(
-        test262_path=str(test262_path),
-        testcases=testcases,
-    )
+def cut_metadata(full_text):
+    start_delim = '/*---'
+    end_delim = '---*/'
 
-    with open(out, 'w') as f:
-        json.dump(root, fp=f, indent=2)
+    try:
+        start_ofs = full_text.index(start_delim) + len(start_delim)
+    except ValueError:
+        # can't find start delimiter => just return the default
+        return ''
+
+    # once we get here, an exception is an exception
+    end_ofs = full_text.index(end_delim, start_ofs)
+    return full_text[start_ofs : end_ofs]
+    
 
 
 @app.command(help='Run a set of test cases')
@@ -335,13 +376,6 @@ def ingest(db_filename, data_filenames, clear):
             delete from groups;
             delete from runs;
         ''')
-
-    @functools.cache
-    def insert_string(s):
-        # there must be a better way...
-        db.execute('insert or ignore into strings (string) values (?)', [s])
-        res = db.execute('select string_id from strings where string = ?', [s])
-        return res.fetchone()[0]
 
     def insert_run(record):
         group = os.path.dirname(record['testcase'])
