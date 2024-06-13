@@ -432,9 +432,9 @@ def list(data_file, version, mcjs_root, outcome, filter, show_errors):
         , use_strict
         , st.string as testcase
         , se.string as error_msg
-        from runs, strings st, strings se
+        from runs left join strings se on (se.string_id = error_message_sid)
+        , strings st
         where st.string_id = testcase_sid
-        and se.string_id = error_message_sid
         and version = ?
         and testcase like '%' || ? || '%'
     '''
