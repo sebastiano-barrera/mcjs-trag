@@ -362,96 +362,15 @@ def run_test(test262_path, mcjs, vm_version, rel_path, use_strict, expected_nega
     return output
 
 
-@app.command(help='Ingest .jsonl data into a SQLite database (.db)')
-@click.option('--db', 'db_filename', required=True, help='Database file.  Will be created if it doesn''t exist.')
-@click.option('--clear/--no-clear', help='Clear previous runs from the database.')
-@click.argument('data_filenames', nargs=-1)
-def ingest(db_filename, data_filenames, clear):
-    db = sqlite3.connect(db_filename, autocommit=False)
-
-    db.executescript('''
-    create table if not exists strings
-      ( string_id integer primary key autoincrement
-      , string varchar not null unique
-      );
-    create table if not exists groups
-      ( path_sid unique references strings (string_id)
-      , group_sid references strings (string_id)
-      );
-    create table if not exists runs
-      ( testcase_sid not null references strings (string_id)
-      , error_category varchar
-      , error_message_sid references strings (string_id)
-      , use_strict tinyint not null
-      , version char(40) not null
-      );
-    ''')
-
-    if clear:
-        print('clear: deleting previous records (will be un-deleted if anything fails)')
-        db.executescript('''
-            delete from groups;
-            delete from runs;
-        ''')
-
-    def insert_run(record):
-        group = os.path.dirname(record['testcase'])
-        group_sid = insert_string(group)
-        testcase_sid = insert_string(record['testcase'])
-
-        error = record.get('error')
-        if error is None:
-            error_message_sid = None
-            error_category = None
-        else:
-            error_message_sid = insert_string(record['error']['message'])
-            error_category = record['error']['category']
-
-        db.execute(
-            'insert or ignore into groups (path_sid, group_sid) values (?, ?)',
-            (testcase_sid, group_sid)
-        )
-        db.execute(
-            'insert into runs (testcase_sid, error_category, error_message_sid, use_strict, version) '
-            + 'values (?, ?, ?, ?, ?)',
-            ( testcase_sid
-            , error_category
-            , error_message_sid
-            , record['use_strict']
-            , record['version']
-            )
-        )
-
-    with db:
-        for data_filename in data_filenames:
-            print(data_filename)
-
-            input = open(data_filename, 'rb')
-            if data_filename.endswith('.gz'):
-                input = gzip.open(input)
-
-            with input:
-                for line in input:
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        print('(invalid JSON; skipping line)')
-                        continue
-
-                    insert_run(record)
-
-    print('transaction committed.')
-
-
 @app.command(help='Overview of test results')
-@click.option('--db', 'db_filename', required=True, help='Database file')
+@click.option('--file', 'data_file', type=Path, default='trag.data', help='Data file to read')
 @click.option('--version', help='mcjs version for which to summarize test results')
 @click.option('--mcjs', 'mcjs_root', help='gather version from this directory where the mcjs repository is located')
-def status(db_filename, version, mcjs_root):
+def status(data_file, version, mcjs_root):
     from tabulate import tabulate
 
-    if not os.path.exists(db_filename):
-        print(f'error: {db_filename}: No such file or directory')
+    if not data_file.is_file():
+        print(f'error: {data_file}: not a file')
         sys.exit(1)
 
     if version is None:
@@ -459,9 +378,9 @@ def status(db_filename, version, mcjs_root):
             print('pass either --version or --mcjs.')
             sys.exit(1)
 
-        version = get_version_of_repo(mcjs_root)
+        version = resolve_commits(mcjs_root, 'HEAD^..')[0]
 
-    db = sqlite3.connect(db_filename)
+    db = sqlite3.connect(data_file)
     res = db.execute('''
         with q as (
             select g.group_sid, iif(error_message_sid is null, 1, 0) as success
@@ -487,27 +406,27 @@ def status(db_filename, version, mcjs_root):
 
 
 @app.command(help='List detailed test case results')
-@click.option('--db', 'db_filename', required=True, help='Database file')
+@click.option('--file', 'data_file', type=Path, default='trag.data', help='Data file to read from')
 @click.option('--version', help='mcjs version for which to summarize test results')
 @click.option('--mcjs', 'mcjs_root', help='gather version from this directory where the mcjs repository is located')
 @click.option('--outcome', help='Only show test cases with the given outcome (passed, failed)')
 @click.option('--filter', default='', help='Only show test cases whose path contains this string')
 @click.option('--errors/--no-errors', 'show_errors', help='Show error messages')
-def list(db_filename, version, mcjs_root, outcome, filter, show_errors):
+def list(data_file, version, mcjs_root, outcome, filter, show_errors):
     from tabulate import tabulate
 
-    if not os.path.exists(db_filename):
-        print(f'error: {db_filename}: No such file or directory')
-        return
+    if not data_file.is_file():
+        print(f'error: {data_file}: not a file')
+        sys.exit(1)
 
     if version is None:
         if mcjs_root is None:
-            print('error: pass either --version or --mcjs.')
-            return
+            print('pass either --version or --mcjs.')
+            sys.exit(1)
 
-        version = get_version_of_repo(mcjs_root)
+        version = resolve_commits(mcjs_root, 'HEAD^..')[0]
 
-    db = sqlite3.connect(db_filename)
+    db = sqlite3.connect(data_file)
     query = '''
         select (error_message_sid is null) as success
         , use_strict
