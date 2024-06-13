@@ -1,5 +1,5 @@
-testrun.json
-testdata.db
-testdata.db-journal
+trag.data
+trag.data-journal
 venv
-results
+__pycache__/
+trag.data trag.data.gz
