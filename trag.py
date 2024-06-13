@@ -26,18 +26,11 @@ from concurrent.futures import ThreadPoolExecutor
 def app():
     pass
 
-# TODO
-#  [x] init instead of scan
-#  [x] threads instead of async
-#  [ ] no data files outside of the SQLite database
-#  [ ] test cases list in a resource file, sibling to the script
-
 
 TESTCASES = [
     line.strip()
     for line in Path(__file__).parent.joinpath('test-cases.txt').open('r')
 ]
-
 
 
 @app.command(
