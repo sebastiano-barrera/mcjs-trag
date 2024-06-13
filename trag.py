@@ -71,18 +71,23 @@ def init(test262_path, data_file, force):
     create table if not exists testcases
       ( testcase_sid not null references strings (string_id)
       , metadata varchar
+      , unique (testcase_sid)
       );
     ''')
+
+    import yaml
 
     for rel_path in TESTCASES:
         testcase_sid = insert_string(db, rel_path)
 
         full_text = (test262_path / rel_path).open().read()
-        metadata_raw = cut_metadata(full_text)
+        metadata_yaml = cut_metadata(full_text)
+        metadata = yaml.safe_load(metadata_yaml) or {}
+        metadata_json = json.dumps(metadata)
 
         db.execute(
-            'insert into testcases (testcase_sid, metadata) values (?, ?)',
-            (testcase_sid, metadata_raw),
+            'insert or replace into testcases (testcase_sid, metadata) values (?, ?)',
+            (testcase_sid, metadata_json),
         )
 
     db.commit()
@@ -141,8 +146,6 @@ def run(mcjs_path, test262_path, versions, data_file, testcase_filter, dry_run, 
         print('nothing to do.')
         return
 
-    import yaml
-
     print('loading testcases')
     cur = db.execute('''
         select s.string as relpath, metadata
@@ -151,8 +154,8 @@ def run(mcjs_path, test262_path, versions, data_file, testcase_filter, dry_run, 
         and relpath like '%' || ? || '%'
     ''', (testcase_filter, ))
     testcases = {}
-    for (relpath, metadata_raw) in cur:
-        testcases[relpath] = yaml.safe_load(metadata_raw) or {}
+    for (relpath, metadata_json) in cur:
+        testcases[relpath] = json.loads(metadata_json) or {}
 
     warnings = []
 
@@ -243,6 +246,7 @@ def restore_repo_status(path):
             ['git', 'checkout', original_head],
             cwd=path,
         )
+
 
 def resolve_commits(repo, rev_range):
     with contextlib.chdir(repo):
