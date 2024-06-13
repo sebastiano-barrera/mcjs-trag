@@ -4,8 +4,8 @@ import click
 
 from pathlib import Path
 from pprint import pprint
-import asyncio
 import contextlib
+from contextlib import contextmanager
 import functools
 import gzip
 try:
@@ -19,6 +19,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+
 
 @click.group()
 def app():
@@ -26,7 +28,7 @@ def app():
 
 # TODO
 #  [x] init instead of scan
-#  [ ] threads instead of async
+#  [x] threads instead of async
 #  [ ] no data files outside of the SQLite database
 #  [ ] test cases list in a resource file, sibling to the script
 
@@ -66,7 +68,7 @@ def init(test262_path, data_file, force):
       , use_strict tinyint not null
       , version char(40) not null
       );
-    create table testcases
+    create table if not exists testcases
       ( testcase_sid not null references strings (string_id)
       , metadata varchar
       );
@@ -83,8 +85,6 @@ def init(test262_path, data_file, force):
             (testcase_sid, metadata_raw),
         )
 
-        raise RuntimeError()
-        
     db.commit()
 
 @functools.cache
@@ -111,141 +111,162 @@ def cut_metadata(full_text):
     
 
 
-@app.command(help='Run a set of test cases')
-@click.option('--mcjs', type=Path, required=True, help='Path to mcjs repo')
-@click.option('-o', '--out', required=True, help='Results directory')
-@click.option('-f', '--filter', 'testcase_filter', help='Only run test cases whose path contains this substring')
+@app.command(help='Run test cases for a specific version')
+@click.option('--mcjs', 'mcjs_path', type=Path, required=True, help='Path to mcjs repo')
+@click.option('--test262', 'test262_path', type=Path, required=True, help='Path to test262 repo')
+@click.option('-v', '--versions', default='HEAD', help='Test these commits. (Git\'s revision-range syntax is allowed)')
+@click.option('-f', '--file', 'data_file', default='trag.data', help='Data file to manipulate.')
+@click.option('--filter', 'testcase_filter', default='', help='Only run test cases whose path contains this substring')
 @click.option('-n', '--dry-run', is_flag=True, help='Only print the selected test cases; don\'t run anything')
-@click.option('--force/--no-force', help='Overwrite results file if it exists (default: skip)')
 @click.option('-j', '--max-jobs', default=10, type=int, help='Limit the max number of concurrent tests running at any given time')
-@click.option('--commits', 'commits_filename', help='Checkout and test the commits listed in the given file.')
-@click.argument('testrun_filename', metavar='testrun.json')
-def run(testrun_filename, mcjs, out, force, max_jobs, commits_filename, testcase_filter, dry_run):
-    with open(testrun_filename) as testrun_file:
-        testrun = json.load(testrun_file)
-        test262_path = Path(testrun['test262_path'])
-        testcases = testrun['testcases']
-
-    if commits_filename:
-        commits = [
-            line.strip()
-            for line in open(commits_filename)
-        ]
-
-        if '%v' not in out:
-            raise RuntimeError('The output file (passed with --out) must include "%v" so that a new file per version is created.')
-
-    else:
-        vm_version = get_version_of_repo(mcjs)
-        commits = [vm_version]
-
+def run(mcjs_path, test262_path, versions, data_file, testcase_filter, dry_run, max_jobs):
+    commits = resolve_commits(repo=mcjs_path, rev_range=versions)
     for commit in commits:
         if not re.match(r'^[a-f0-9]+$', commit):
             raise RuntimeError('Invalid commit hash in commits file:', commit)
 
-    original_out = out
+    db = sqlite3.connect(data_file, autocommit=False)
 
-    for vm_version in commits:
-        print('---')
-        print('Testing VM version:', vm_version)
+    already_tested = set(
+        version
+        for (version, ) in db.execute('select distinct version from runs')
+    )
 
-        out = original_out
-        out = out.replace('%v', vm_version)
-        if out.endswith('/'):
-            out += 'out'
-        if not out.endswith('.jsonl'):
-            out = out + '.jsonl'
-        out = Path(out)
-        out_compressed = Path(str(out) + '.gz')
+    for commit in commits:
+        action = 'skip' if commit in already_tested else 'TEST'
+        print('will', action, commit)
 
-        print('out file:', out)
+    commits_to_test = [c for c in commits if c not in already_tested]
+    if not commits_to_test:
+        print('nothing to do.')
+        return
 
-        if out_compressed.exists() and not force:
-            print('file already exists, skipping task')
-            continue
+    import yaml
 
-        if commits_filename and not dry_run:
-            try:
-                switch_to_version(
-                    src_dir=mcjs,
-                    vm_version=vm_version,
-                )
-            except VersionSwitchError:
-                with contextlib.redirect_stdout(out.open('w')):
-                    print('# ' + json.dumps({
-                        'error': 'vm build error',
-                        'version': vm_version,
-                    }))
+    print('loading testcases')
+    cur = db.execute('''
+        select s.string as relpath, metadata
+        from testcases, strings s
+        where testcase_sid = s.string_id
+        and relpath like '%' || ? || '%'
+    ''', (testcase_filter, ))
+    testcases = {}
+    for (relpath, metadata_raw) in cur:
+        testcases[relpath] = yaml.safe_load(metadata_raw) or {}
+
+    warnings = []
+
+    with (
+        restore_repo_status(mcjs_path),
+        ThreadPoolExecutor(max_workers=max_jobs) as tpool,
+    ):
+        for vm_version in commits:
+            print('---')
+            if vm_version in already_tested:
+                print('Skipping, already tested:', vm_version)
                 continue
 
-        out.parent.mkdir(exist_ok=True)
+            print('Testing VM version:', vm_version)
+            db.execute('delete from runs where version = ?', (vm_version, ))
 
-        testcase_semaphore = asyncio.Semaphore(max_jobs)
-        async def call_limited(func, *args, **kwargs):
-            async with testcase_semaphore:
-                return await func(*args, **kwargs)
+            if not dry_run:
+                try:
+                    switch_to_version(
+                        src_dir=mcjs_path,
+                        vm_version=vm_version,
+                    )
+                except VersionSwitchError:
+                    warn('# ERROR while switching to version {}'.format(vm_version))
+                    continue
 
-        runner = Runner(
-            test262_path=test262_path,
-            vm_version=vm_version,
-            mcjs=mcjs,
-        )
-        tasks = []
-        for rel_path, testcase in testcases.items():
-            metadata = testcase['metadata'] or {}
-
-            if testcase_filter is not None and testcase_filter not in rel_path:
-                continue
-
-            def submit_task(use_strict):
-                if dry_run:
-                    use_strict = 'strict' if use_strict else 'sloppy'
-                    print(f'would run: {rel_path} ({use_strict})')
-                else:
-                    tasks.append(call_limited(
-                        runner.run_test,
-                        rel_path=rel_path,
+            futures = []
+            for relpath, metadata in testcases.items():
+                def submit_task(use_strict):
+                    futures.append(tpool.submit(
+                        run_test,
+                        test262_path=test262_path,
+                        vm_version=vm_version,
+                        mcjs=mcjs_path,
+                        rel_path=relpath,
                         use_strict=use_strict,
                         expected_negative='negative' in metadata,
+                        dry_run=dry_run,
                     ))
 
-            flags = metadata.get('flags', []) or []
-            if 'onlyStrict' not in flags:
-                submit_task(use_strict=False)
-            if 'noStrict' not in flags:
-                submit_task(use_strict=True)
+                flags = metadata.get('flags', []) or []
+                if 'onlyStrict' not in flags:
+                    submit_task(use_strict=False)
+                if 'noStrict' not in flags:
+                    submit_task(use_strict=True)
 
-        async def collect_results():
-            if dry_run:
-                return
-
-            with out.open('w') as out_file:
-                for get_result in asyncio.as_completed(tasks):
-                    result = await get_result
-                    json_line = json.dumps(result)
-                    # MUST be all on a single line
-                    assert '\n' not in json_line
-                    print(json_line, file=out_file)
-
-            with out.open('rb') as out_file:
-                with gzip.open(str(out_compressed), 'wb') as compressed_file:
-                    shutil.copyfileobj(out_file, compressed_file)
-
-            out.unlink()
-
-        if not dry_run:
-            asyncio.run(collect_results())
-        print(f'Finished. {len(tasks)} results written to {out}.gz')
+            from concurrent.futures import as_completed
+            for i, future in enumerate(as_completed(futures)):
+                result = future.result()
+                print(
+                    '{:5}/{:5} {} {} {:60}'.format(
+                        i + 1,
+                        len(futures),
+                        result['version'][:8],
+                        'strict' if result['use_strict'] else 'sloppy',
+                        os.path.basename(result['testcase']),
+                    ),
+                    end='\r',
+                )
+                store_result(db, result)
 
 
-def get_version_of_repo(root):
-    with contextlib.chdir(root):
-        return subprocess.run(
-            ['git', 'rev-parse', 'HEAD'],
-            check=True,
-            capture_output=True,
-            encoding='utf8'
-        ).stdout.strip()
+            print(f'Finished. {len(futures)} results')
+            if not dry_run:
+                db.commit()
+
+    if warnings:
+        print('Finished with warnings:')
+        for w in warnings:
+            print('-', w)
+
+
+
+@contextmanager
+def restore_repo_status(path):
+    original_head = subprocess.check_output(
+        ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+        cwd=path,
+        encoding='ascii',
+    ).strip()
+    print('will restore repo to {} ({})'.format(original_head, path))
+
+    try:
+        yield
+    finally:
+        print('restoring repo to {} ({})'.format(original_head, path))
+        subprocess.check_call(
+            ['git', 'checkout', original_head],
+            cwd=path,
+        )
+
+def resolve_commits(repo, rev_range):
+    with contextlib.chdir(repo):
+        if '..' in rev_range:
+            cmd = ['git', 'log', '--format=%H', rev_range]
+        else:
+            cmd = ['git', 'rev-parse', rev_range]
+        return subprocess.check_output(cmd, encoding='ascii').splitlines()
+
+def store_result(db, result):
+    testcase_sid = insert_string(db, result['testcase'])
+    if result.get('error'):
+        err_msg_sid = insert_string(db, result['error']['message'])
+        err_cat = result['error']['category']
+    else:
+        err_msg_sid = None
+        err_cat = None
+
+    db.execute('''
+        insert into runs (testcase_sid, error_category, error_message_sid, use_strict, version)
+        values (?, ?, ?, ?, ?);
+        ''',
+        (testcase_sid, err_cat, err_msg_sid, result['use_strict'], result['version'])
+    )
 
 
 def mk_cmd(files, use_strict):
@@ -276,58 +297,35 @@ def switch_to_version(src_dir, vm_version):
             raise VersionSwitchError() from err
 
 
-class Runner:
-    def __init__(self, **kwargs):
-        for name in 'test262_path mcjs vm_version'.split():
-            setattr(self, name, kwargs[name])
+def run_test(test262_path, mcjs, vm_version, rel_path, use_strict, expected_negative=False, dry_run=False):
+    files = [
+        test262_path / 'harness/sta.js',
+        test262_path / 'harness/assert.js',
+        test262_path / rel_path,
+    ]
+    cmd = mk_cmd(files=files, use_strict=use_strict)
 
-    async def run_test(self, rel_path, use_strict, expected_negative=False):
-        files = [
-            self.test262_path / 'harness/sta.js',
-            self.test262_path / 'harness/assert.js',
-            self.test262_path / rel_path,
-        ]
-        cmd = mk_cmd(files=files, use_strict=use_strict)
+    output = {
+        'testcase': rel_path,
+        'version': vm_version,
+        'use_strict': use_strict,
+    }
 
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=self.mcjs,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+    if dry_run:
+        return output
+    
+    try:
+        completed_process = subprocess.run(
+            cmd,
+            cwd=mcjs,
+            capture_output=True,
+            timeout=10.0,
         )
 
-        output = None
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=10.0,
-            )
-        except TimeoutError:
-            process.kill()
-            output = {
-                'error': {
-                    'category': 'timeout',
-                    'message': 'runner timed out',
-                },
-            }
-        else:
-            if process.returncode != 0:
-                # runner failure
-                try:
-                    error_message = stdout.decode('utf8')
-                except UnicodeDecodeError:
-                    error_message = '<# encoding error #>'
-                output = {
-                    'error': {
-                        'category': 'runner failure',
-                        'message': error_message,
-                    }
-                }
-            else:
-                # use the last line of stdout (a handful of versions emit some garbage on stdout)
-                stdout_lines = stdout.splitlines()
-                output = json.loads(stdout_lines[-1])
+        # use the last line of stdout (a handful of versions emit some garbage on stdout)
+        stdout_lines = completed_process.stdout.splitlines()
+        outcome = json.loads(stdout_lines[-1])
+        output.update(outcome)
 
         if expected_negative:
             # TODO handle the different categories of expected errors
@@ -339,10 +337,25 @@ class Runner:
             else:
                 output['error'] = None
 
-        output['testcase'] = rel_path
-        output['version'] = self.vm_version
-        output['use_strict'] = use_strict
-        return output
+    except subprocess.TimeoutExpired:
+        output['error'] = {
+            'category': 'timeout',
+            'message': 'runner timed out',
+        }
+
+    except subprocess.CalledProcessError as err:
+        # runner failure
+        try:
+            error_message = err.output.decode('utf8')
+        except UnicodeDecodeError:
+            error_message = '<# encoding error #>'
+
+        output['error'] = {
+            'category': 'runner failure',
+            'message': error_message,
+        }
+
+    return output
 
 
 @app.command(help='Ingest .jsonl data into a SQLite database (.db)')
