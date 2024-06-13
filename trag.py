@@ -362,6 +362,11 @@ def run_test(test262_path, mcjs, vm_version, rel_path, use_strict, expected_nega
     return output
 
 
+def assert_exists(path):
+    if not Path(path).is_file():
+        raise RuntimeError(f'error: {data_file}: not a file')
+   
+
 @app.command(help='Overview of test results')
 @click.option('--file', 'data_file', type=Path, default='trag.data', help='Data file to read')
 @click.option('--version', help='mcjs version for which to summarize test results')
@@ -369,15 +374,12 @@ def run_test(test262_path, mcjs, vm_version, rel_path, use_strict, expected_nega
 def status(data_file, version, mcjs_root):
     from tabulate import tabulate
 
-    if not data_file.is_file():
-        print(f'error: {data_file}: not a file')
-        sys.exit(1)
+    assert_exists(data_file)
 
     if version is None:
         if mcjs_root is None:
             print('pass either --version or --mcjs.')
             sys.exit(1)
-
         version = resolve_commits(mcjs_root, 'HEAD^..')[0]
 
     db = sqlite3.connect(data_file)
@@ -465,15 +467,29 @@ def list(data_file, version, mcjs_root, outcome, filter, show_errors):
 
 
 @app.command(help='Compare test results between versions')
-@click.option('--db', 'db_filename', required=True, help='Database file')
+@click.option('--file', 'data_file', type=Path, default='trag.data', help='Data file to read from')
+@click.option('--mcjs', 'mcjs_path', type=Path, help='Path to mcjs repo. Allows using git commit syntax for versions')
 @click.argument('version_a')
 @click.argument('version_b')
-def diff(db_filename, version_a, version_b):
-    if not os.path.exists(db_filename):
-        print(f'error: {db_filename}: No such file or directory')
+def diff(data_file, version_a, version_b, mcjs_path):
+    if not os.path.exists(data_file):
+        print(f'error: {data_file}: No such file or directory')
         sys.exit(1)
 
-    db = sqlite3.connect(db_filename)
+    if mcjs_path:
+        version_a = resolve_commits(repo=mcjs_path, rev_range=version_a)[0]
+        version_b = resolve_commits(repo=mcjs_path, rev_range=version_b)[0]
+    else:
+        def check_commit_id(s):
+            import string
+            if len(s) != 40 or not all(c in string.hexdigits for c in s):
+                print(f'invalid commit ID: {s} (git commit syntax only available with --mcjs. See --help)')
+                sys.exit(1)
+
+        check_commit_id(version_a)
+        check_commit_id(version_b)
+
+    db = sqlite3.connect(data_file)
 
     res = db.execute('''
         select st.string as testcase, se.string as error_message
