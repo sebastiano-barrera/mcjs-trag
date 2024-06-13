@@ -2,4 +2,4 @@ trag.data
 trag.data-journal
 venv
 __pycache__/
-trag.data trag.data.gz
+trag.data*
