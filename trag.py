@@ -244,7 +244,7 @@ def restore_repo_status(path):
 def resolve_commits(repo, rev_range):
     with contextlib.chdir(repo):
         if '..' in rev_range:
-            cmd = ['git', 'log', '--format=%H', rev_range]
+            cmd = ['git', 'log', '--first-parent', '--format=%H', rev_range]
         else:
             cmd = ['git', 'rev-parse', rev_range]
         return subprocess.check_output(cmd, encoding='ascii').splitlines()
