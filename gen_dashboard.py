@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 
-import click
 import sqlite3
 import os
 from pathlib import Path
 import shutil
 import json
+import contextlib
+import subprocess
 
+import click
 from mako.template import Template
 
 
 @click.command()
-@click.option('--db', 'db_filename', required=True, help='Path to the database')
-@click.option('--commits', 'commits_filename', required=True, help='Filename of the commit list')
+@click.option('--file', 'data_file', type=Path, default='trag.data', help='Data file to read')
+@click.option('--mcjs', 'mcjs_root', help='gather version from this directory where the mcjs repository is located')
 @click.option('-o', '--output', 'output_dir', type=Path, required=True, help='Directory where to place output files in')
-def main(db_filename, commits_filename, output_dir):
-    if not os.path.exists(db_filename):
-        print(f'error: {db_filename}: No such file or directory')
+def main(data_file, mcjs_root, output_dir):
+    if not os.path.exists(data_file):
+        print(f'error: {data_file}: No such file or directory')
         os.exit(1)
 
-    db = sqlite3.connect(db_filename, autocommit=False)
+    db = sqlite3.connect(data_file, autocommit=False)
 
-    commit_ids = [line.strip() for line in open(commits_filename)]
+    commit_ids = resolve_commits(repo=mcjs_root, rev_range='HEAD~100..')
 
     rows = db.execute('''
         select version
@@ -85,6 +87,16 @@ def main(db_filename, commits_filename, output_dir):
 
         with (output_dir / f'{commit_id}.json').open('w') as out:
             json.dump({'groups': groups}, out)
+
+            
+def resolve_commits(repo, rev_range):
+    with contextlib.chdir(repo):
+        if '..' in rev_range:
+            cmd = ['git', 'log', '--first-parent', '--format=%H', rev_range]
+        else:
+            cmd = ['git', 'rev-parse', rev_range]
+        return subprocess.check_output(cmd, encoding='ascii').splitlines()
+
 
 
 
