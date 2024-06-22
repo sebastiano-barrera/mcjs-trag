@@ -117,7 +117,8 @@ def cut_metadata(full_text):
 @click.option('--filter', 'testcase_filter', default='', help='Only run test cases whose path contains this substring')
 @click.option('-n', '--dry-run', is_flag=True, help='Only print the selected test cases; don\'t run anything')
 @click.option('-j', '--max-jobs', default=10, type=int, help='Limit the max number of concurrent tests running at any given time')
-def run(mcjs_path, test262_path, versions, data_file, testcase_filter, dry_run, max_jobs):
+@click.option('--force/--no-force', help='Always perform the test, overwrite data if necessary')
+def run(mcjs_path, test262_path, versions, data_file, testcase_filter, dry_run, max_jobs, force):
     commits = resolve_commits(repo=mcjs_path, rev_range=versions)
     for commit in commits:
         if not re.match(r'^[a-f0-9]+$', commit):
@@ -125,10 +126,13 @@ def run(mcjs_path, test262_path, versions, data_file, testcase_filter, dry_run, 
 
     db = sqlite3.connect(data_file, autocommit=False)
 
-    already_tested = set(
-        version
-        for (version, ) in db.execute('select distinct version from runs')
-    )
+    if force:
+        already_tested = set()
+    else:
+        already_tested = set(
+            version
+            for (version, ) in db.execute('select distinct version from runs')
+        )
 
     for commit in commits:
         action = 'skip' if commit in already_tested else 'TEST'
