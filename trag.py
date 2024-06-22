@@ -6,6 +6,7 @@ from pathlib import Path
 from pprint import pprint
 import contextlib
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import functools
 import gzip
 try:
@@ -19,7 +20,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import time
 
 
 @click.group()
@@ -60,6 +61,7 @@ def init(test262_path, data_file, force):
       , error_message_sid references strings (string_id)
       , use_strict tinyint not null
       , version char(40) not null
+      , time real
       );
     create table if not exists testcases
       ( testcase_sid not null references strings (string_id)
@@ -263,10 +265,10 @@ def store_result(db, result):
         err_cat = None
 
     db.execute('''
-        insert into runs (testcase_sid, error_category, error_message_sid, use_strict, version)
-        values (?, ?, ?, ?, ?);
+        insert into runs (testcase_sid, error_category, error_message_sid, use_strict, version, time)
+        values (?, ?, ?, ?, ?, ?);
         ''',
-        (testcase_sid, err_cat, err_msg_sid, result['use_strict'], result['version'])
+        (testcase_sid, err_cat, err_msg_sid, result['use_strict'], result['version'], result.get('time'))
     )
 
 
@@ -316,6 +318,7 @@ def run_test(test262_path, mcjs, vm_version, rel_path, use_strict, expected_nega
         return output
     
     try:
+        start_time = time.time()
         completed_process = subprocess.run(
             cmd,
             cwd=mcjs,
@@ -327,6 +330,9 @@ def run_test(test262_path, mcjs, vm_version, rel_path, use_strict, expected_nega
         stdout_lines = completed_process.stdout.splitlines()
         outcome = json.loads(stdout_lines[-1])
         output.update(outcome)
+
+        end_time = time.time()
+        output['time'] = end_time - start_time
 
         if expected_negative:
             # TODO handle the different categories of expected errors
@@ -345,6 +351,8 @@ def run_test(test262_path, mcjs, vm_version, rel_path, use_strict, expected_nega
         }
 
     except subprocess.CalledProcessError as err:
+        end_time = time.time()
+
         # runner failure
         try:
             error_message = err.output.decode('utf8')
@@ -354,6 +362,7 @@ def run_test(test262_path, mcjs, vm_version, rel_path, use_strict, expected_nega
         output['error'] = {
             'category': 'runner failure',
             'message': error_message,
+            'time': end_time - start_time,
         }
 
     return output
