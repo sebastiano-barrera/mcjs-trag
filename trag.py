@@ -157,6 +157,9 @@ def run(mcjs_path, test262_path, versions, data_file, testcase_filter, dry_run, 
         testcases[relpath] = json.loads(metadata_json) or {}
 
     warnings = []
+    def warn(message):
+        warnings.append(message)
+        print('WARNING:', message)
 
     with (
         restore_repo_status(mcjs_path),
