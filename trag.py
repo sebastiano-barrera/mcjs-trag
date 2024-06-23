@@ -438,8 +438,9 @@ def status(data_file, version, mcjs_root):
 @click.option('--mcjs', 'mcjs_path', help='Gather version from this directory where the mcjs repository is located')
 @click.option('--outcome', type=click.Choice(('passed', 'failed')), help='Only show test cases with the given outcome')
 @click.option('--filter', default='*', help='Only show test cases whose path matches this glob pattern (e.g "test/*unary*")')
+@click.option('--tag', help='Only show test cases with the given TAG')
 @click.option('--errors/--no-errors', 'show_errors', help='Show error messages')
-def list(data_file, version, mcjs_path, outcome, filter, show_errors):
+def list(data_file, version, mcjs_path, outcome, filter, tag, show_errors):
     from tabulate import tabulate
 
     if not data_file.is_file():
@@ -448,7 +449,8 @@ def list(data_file, version, mcjs_path, outcome, filter, show_errors):
 
     db = sqlite3.connect(data_file)
     query = '''
-        select (error_message_sid is null) as success
+        select version
+        , (error_message_sid is null) as success
         , use_strict
         , st.string as testcase
         , se.string as error_msg
@@ -458,9 +460,11 @@ def list(data_file, version, mcjs_path, outcome, filter, show_errors):
         and testcase glob ?
     '''
     args = [filter]
+
     if outcome:
         query += 'and success = ?'
         args += [1 if outcome == 'passed' else 0]
+
     if version:
         if mcjs_path:
             version = resolve_commits(mcjs_path, version)[0]
@@ -469,6 +473,10 @@ def list(data_file, version, mcjs_path, outcome, filter, show_errors):
 
         query += 'and version = ?'
         args.append(version)
+
+    if tag:
+        query += 'and testcase_sid in (select testcase_sid from tags where tag = ?)'
+        args.append(tag)
 
     res = db.execute(query, args)
 
@@ -481,8 +489,9 @@ def list(data_file, version, mcjs_path, outcome, filter, show_errors):
         1: 'strict',
     }
 
-    for (success, use_strict, testcase, error_msg) in res:
-        print('{:10} {:10} {}'.format(success_s[success], use_strict_s[use_strict], testcase))
+    for (version, success, use_strict, testcase, error_msg) in res:
+        version = version[:8]
+        print('{:8} {:10} {:10} {}'.format(version, success_s[success], use_strict_s[use_strict], testcase))
         if show_errors:
             for line in error_msg.splitlines():
                 print('    | ' + line)
