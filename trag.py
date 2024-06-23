@@ -556,15 +556,16 @@ def diff(data_file, version_a, version_b, mcjs_path):
 def tag():
     pass
 
+
 @tag.command(
     short_help='Add TAG tot the given list of testcases.',
     help='''
-Add TAG tot the given list of testcases. Testcases can be specied with glob
+Add TAG to the given list of testcases. Testcases can be specied with glob
 patterns (e.g. "test/language/*unary*").
 '''
 )
 @click.option('--file', 'data_file', type=Path, default='trag.data', help='Data file to read from')
-@click.option('-n/-f', '--dry-run/--force', help="Just pretend, don't actually commit data")
+@click.option('-n/-f', '--dry-run/--force', default=True, help="Just pretend, don't actually commit data")
 @click.argument('tag', nargs=1)
 @click.argument('testcases_patterns', metavar='TESTCASES', required=True, nargs=-1)
 def add(data_file, dry_run, tag, testcases_patterns):
@@ -579,7 +580,7 @@ def add(data_file, dry_run, tag, testcases_patterns):
     sids = [resolve_string(db, s) for s in testcases]
 
     print('adding tag [{}] to the following testcases ({}):'.format(tag, len(testcases)))
-    for tc in testcases:
+    for tc in sorted(testcases):
         print(' -', tc)
 
     for sid in sids:
@@ -587,6 +588,45 @@ def add(data_file, dry_run, tag, testcases_patterns):
             insert or ignore into tags (tag, testcase_sid)
             values (?, ?)
         ''', (tag, sid))
+
+    if dry_run:
+        print('(dry run; discarding transaction)')
+    else:
+        db.commit()
+
+
+@tag.command(
+    short_help='Remove a tag (in general or from a set of testcases).',
+    help='''
+Remove TAG from the given set of testcases. Testcases can be specied with glob
+patterns (e.g. "test/language/*unary*").
+'''
+)
+@click.option('--file', 'data_file', type=Path, default='trag.data', help='Data file to read from')
+@click.option('-n/-f', '--dry-run/--force', default=True, help="Just pretend, don't actually commit data")
+@click.argument('tag', nargs=1)
+@click.argument('testcases_pattern', metavar='TESTCASES', required=True, nargs=1)
+def rm(data_file, dry_run, tag, testcases_pattern):
+    db = sqlite3.connect(data_file, autocommit=False)
+
+    res = db.execute('''
+        select string
+        from tags, strings
+        where string_id = testcase_sid
+            and tag = ?
+            and testcase_sid in (select string_id from strings where string glob ?);
+    ''', (tag, testcases_pattern))
+    testcases = sorted(s for (s, ) in res)
+
+    print('removing tag [{}] from the following testcases ({}):'.format(tag, len(testcases)))
+    for tc in testcases:
+        print(' -', tc)
+
+    db.execute('''
+        delete from tags
+        where tag = ?
+        and testcase_sid in (select string_id from strings where string glob ?);
+    ''', (tag, testcases_pattern))
 
     if dry_run:
         print('(dry run; discarding transaction)')
