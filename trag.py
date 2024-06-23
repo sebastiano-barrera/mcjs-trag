@@ -68,6 +68,11 @@ def init(test262_path, data_file, force):
       , metadata varchar
       , unique (testcase_sid)
       );
+    create table if not exists tags
+      ( testcase_sid integer
+      , tag varchar
+      , unique (testcase_sid, tag)
+      );
     ''')
 
     import yaml
@@ -91,6 +96,10 @@ def init(test262_path, data_file, force):
 def insert_string(db, s):
     # there must be a better way...
     db.execute('insert or ignore into strings (string) values (?)', [s])
+    return resolve_string(db, s)
+
+@functools.cache
+def resolve_string(db, s):
     res = db.execute('select string_id from strings where string = ?', [s])
     return res.fetchone()[0]
 
@@ -541,6 +550,58 @@ def diff(data_file, version_a, version_b, mcjs_path):
     print('Failures fixed:', len(new_successes))
     for (testcase, ) in new_successes:
          print(' * ' + testcase)
+
+
+@app.group(help='Manage tags (add, remove, list, ...)')
+def tag():
+    pass
+
+@tag.command(
+    short_help='Add TAG tot the given list of testcases.',
+    help='''
+Add TAG tot the given list of testcases. Testcases can be specied with glob
+patterns (e.g. "test/language/*unary*").
+'''
+)
+@click.option('--file', 'data_file', type=Path, default='trag.data', help='Data file to read from')
+@click.option('-n/-f', '--dry-run/--force', help="Just pretend, don't actually commit data")
+@click.argument('tag', nargs=1)
+@click.argument('testcases_patterns', metavar='TESTCASES', required=True, nargs=-1)
+def add(data_file, dry_run, tag, testcases_patterns):
+    db = sqlite3.connect(data_file, autocommit=False)
+
+    testcases = set(
+        testcase
+        for pattern in testcases_patterns
+        for testcase in list_testcases(db, pattern)
+    )
+
+    sids = [resolve_string(db, s) for s in testcases]
+
+    print('adding tag [{}] to the following testcases ({}):'.format(tag, len(testcases)))
+    for tc in testcases:
+        print(' -', tc)
+
+    for sid in sids:
+        db.execute('''
+            insert or ignore into tags (tag, testcase_sid)
+            values (?, ?)
+        ''', (tag, sid))
+
+    if dry_run:
+        print('(dry run; discarding transaction)')
+    else:
+        db.commit()
+
+def list_testcases(db, glob_pattern):
+    res = db.execute('''
+        select string
+        from strings
+        where string glob ?
+        and string_id in (select distinct testcase_sid from runs)
+    ''', (glob_pattern, ))
+
+    return [s for (s, ) in res]
 
 
 
