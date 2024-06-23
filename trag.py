@@ -656,12 +656,19 @@ def ls(data_file):
         print('{:6} {}'.format(count, tag))
 
 def list_testcases(db, glob_pattern):
-    res = db.execute('''
-        select string
-        from strings
-        where string glob ?
-        and string_id in (select distinct testcase_sid from runs)
-    ''', (glob_pattern, ))
+    if '*' in glob_pattern:
+        res = db.execute('''
+            select string
+            from strings
+            where string glob ?
+            and string_id in (select distinct testcase_sid from runs)
+        ''', (glob_pattern, ))
+    else:
+        res = db.execute('''
+            select string
+            from strings
+            where string = ?
+        ''', (glob_pattern, ))
 
     return [s for (s, ) in res]
 
