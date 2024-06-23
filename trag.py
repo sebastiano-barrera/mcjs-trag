@@ -631,6 +631,21 @@ def rm(data_file, dry_run, tag, testcases_pattern):
     else:
         db.commit()
 
+
+@tag.command(short_help='List used tags')
+@click.option('--file', 'data_file', type=Path, default='trag.data', help='Data file to read from')
+def ls(data_file):
+    db = sqlite3.connect(data_file, autocommit=False)
+    res = db.execute('''
+        select tag, count(*)
+        from tags
+        group by tag
+    ''')
+
+    print('{:6} {}'.format('COUNT', 'TAG'))
+    for (tag, count) in res:
+        print('{:6} {}'.format(count, tag))
+
 def list_testcases(db, glob_pattern):
     res = db.execute('''
         select string
