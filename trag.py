@@ -312,6 +312,13 @@ def switch_to_version(src_dir, vm_version):
             raise VersionSwitchError() from err
 
 
+def check_commit_id(s):
+    import string
+    if len(s) != 40 or not all(c in string.hexdigits for c in s):
+        print(f'invalid commit ID: {s} (git commit syntax only by passing path to mcjs. See --help)')
+        sys.exit(1)
+
+
 def run_test(test262_path, mcjs, vm_version, rel_path, use_strict, expected_negative=False, dry_run=False):
     files = [
         test262_path / 'harness/sta.js',
@@ -427,24 +434,17 @@ def status(data_file, version, mcjs_root):
 
 @app.command(help='List detailed test case results')
 @click.option('--file', 'data_file', type=Path, default='trag.data', help='Data file to read from')
-@click.option('--version', help='mcjs version for which to summarize test results')
-@click.option('--mcjs', 'mcjs_root', help='gather version from this directory where the mcjs repository is located')
-@click.option('--outcome', help='Only show test cases with the given outcome (passed, failed)')
-@click.option('--filter', default='', help='Only show test cases whose path contains this string')
+@click.option('--version', help='Focus on a specific mcjs version')
+@click.option('--mcjs', 'mcjs_path', help='Gather version from this directory where the mcjs repository is located')
+@click.option('--outcome', type=click.Choice(('passed', 'failed')), help='Only show test cases with the given outcome')
+@click.option('--filter', default='*', help='Only show test cases whose path matches this glob pattern (e.g "test/*unary*")')
 @click.option('--errors/--no-errors', 'show_errors', help='Show error messages')
-def list(data_file, version, mcjs_root, outcome, filter, show_errors):
+def list(data_file, version, mcjs_path, outcome, filter, show_errors):
     from tabulate import tabulate
 
     if not data_file.is_file():
         print(f'error: {data_file}: not a file')
         sys.exit(1)
-
-    if version is None:
-        if mcjs_root is None:
-            print('pass either --version or --mcjs.')
-            sys.exit(1)
-
-        version = resolve_commits(mcjs_root, 'HEAD^..')[0]
 
     db = sqlite3.connect(data_file)
     query = '''
@@ -455,16 +455,20 @@ def list(data_file, version, mcjs_root, outcome, filter, show_errors):
         from runs left join strings se on (se.string_id = error_message_sid)
         , strings st
         where st.string_id = testcase_sid
-        and version = ?
-        and testcase like '%' || ? || '%'
+        and testcase glob ?
     '''
-    args = [version, filter]
-    if outcome in ('passed', 'failed'):
+    args = [filter]
+    if outcome:
         query += 'and success = ?'
         args += [1 if outcome == 'passed' else 0]
-    elif outcome is not None:
-        print('invalid value for --outcome:', outcome)
-        sys.exit(1)
+    if version:
+        if mcjs_path:
+            version = resolve_commits(mcjs_path, version)[0]
+        else:
+            check_commit_id(version)
+
+        query += 'and version = ?'
+        args.append(version)
 
     res = db.execute(query, args)
 
@@ -498,12 +502,6 @@ def diff(data_file, version_a, version_b, mcjs_path):
         version_a = resolve_commits(repo=mcjs_path, rev_range=version_a)[0]
         version_b = resolve_commits(repo=mcjs_path, rev_range=version_b)[0]
     else:
-        def check_commit_id(s):
-            import string
-            if len(s) != 40 or not all(c in string.hexdigits for c in s):
-                print(f'invalid commit ID: {s} (git commit syntax only available with --mcjs. See --help)')
-                sys.exit(1)
-
         check_commit_id(version_a)
         check_commit_id(version_b)
 
@@ -644,6 +642,6 @@ def list_testcases(db, glob_pattern):
     return [s for (s, ) in res]
 
 
-
 if __name__ == '__main__':
     app()
+
